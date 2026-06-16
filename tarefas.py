@@ -3,21 +3,21 @@ import numpy as np
 import random
 from ultralytics import YOLO
 
-# 1. MODELO MAIS PRECISO (Trocado de 'yolov8n' para 'yolov8m')
-# Se o seu PC não tiver GPU e travar, use o 'yolov8s-seg.pt' (Small), que é o meio-termo.
+# 1. MODELO (Mude para 'yolov8m-seg.pt' se tiver GPU e quiser mais precisão no cenário)
 model = YOLO('yolov8n-seg.pt')
 
 nomes_classes = model.names
-cores_por_id = {}
 
-# 2. PESO DAS CORES AJUSTADO (Transparência da máscara)
-# 0.4 significa 40% da cor da máscara e 60% da imagem real da webcam.
-# Isso deixa a máscara suave e permite ver o celular/pessoa por trás.
-peso_cor = 0.3
+# Dicionário para salvar uma cor fixa para cada CLASSE (Segmentação Semântica)
+# Ex: Toda cadeira terá a mesma cor, toda mesa terá a mesma cor, etc.
+cores_por_classe = {}
+
+# Transparência da máscara (0.35 para destacar bem os objetos do cenário)
+peso_cor = 0.35
 
 cap = cv2.VideoCapture(0)
 
-# Opcional: Forçar a webcam a capturar em maior resolução (Melhora a precisão)
+# Resolução da webcam
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1100)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 700)
 
@@ -30,64 +30,62 @@ while True:
     if not ret:
         break
     
-    # 3. PARÂMETROS DE ALTA PRECISÃO
-    # conf=0.3: Filtra detecções fracas (evita que o modelo confunda sua mão com um telefone)
-    # iou=0.5: Melhora o rastreamento quando a mão fica na frente do telefone
-    # imgsz=640: Garante que o YOLO processe a imagem em boa resolução
-    results = model.track(
+    # Máscara preta acumuladora para desenhar todas as segmentações do frame
+    mascara_acumulada = np.zeros_like(frame)
+    
+    # 2. DETECTAR TUDO (Removido o filtro 'classes=[0, 67]')
+    results = model.predict(
         frame, 
-        persist=True, 
         stream=True, 
         verbose=False, 
-        classes=[0, 67],
-        conf=0.3,
-        iou=0.5,
+        conf=0.25,  # Reduzido levemente para detectar objetos menores ao fundo (cadeiras/mesas)
         imgsz=640
     )
     
     for r in results:
-        if r.masks is not None and r.boxes.id is not None:
-            
+        if r.masks is not None:
             mascaras = r.masks.xy
             boxes = r.boxes
             
             for segmento, box in zip(mascaras, boxes):
                 class_id = int(box.cls.item())
-                track_id = int(box.id.item())
                 confianca = float(box.conf.item())
-                
                 nome_classe = nomes_classes[class_id]
                 
-                if track_id not in cores_por_id:
-                    cores_por_id[track_id] = (
-                        random.randint(50, 255), 
-                        random.randint(50, 255), 
-                        random.randint(50, 255)
+                # Se a classe ainda não tem cor definida, gera uma cor fixa para ela
+                if class_id not in cores_por_classe:
+                    cores_por_classe[class_id] = (
+                        random.randint(40, 255), 
+                        random.randint(40, 255), 
+                        random.randint(40, 255)
                     )
                 
-                cor = cores_por_id[track_id]
+                cor = cores_por_classe[class_id]
                 
-                # --- DESENHAR A MÁSCARA SEMI-TRANSPARENTE ---
+                # --- DESENHAR A MÁSCARA NO ACUMULADOR ---
                 pts = np.array(segmento, dtype=np.int32)
-                overlay = frame.copy()
-                cv2.fillPoly(overlay, [pts], cor)
+                cv2.fillPoly(mascara_acumulada, [pts], cor)
                 
-                # Aplica o peso_cor atualizado para dar o efeito translúcido
-                cv2.addWeighted(overlay, peso_cor, frame, 1 - peso_cor, 0, frame)
+                # --- RÓTULO DA CLASSE ---
+                x1, y1, _, _ = map(int, box.xyxy[0])
+                texto = f"{nome_classe} [{confianca:.2f}]"
                 
-                # --- DESENHAR A CAIXA E O RÓTULO DINÂMICO ---
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cv2.rectangle(frame, (x1, y1), (x2, y2), cor, 2)
+                (largura_texto, altura_texto), _ = cv2.getTextSize(texto, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
                 
-                texto = f"{nome_classe} {track_id} [{confianca:.2f}]"
+                # Garante que o texto não saia da tela na parte superior
+                y1_ajustado = max(y1, altura_texto + 10)
                 
-                (largura_texto, altura_texto), _ = cv2.getTextSize(texto, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(frame, (x1, y1 - altura_texto - 10), (x1 + largura_texto, y1), cor, -1)
-                
-                # Texto em branco por cima do fundo colorido
-                cv2.putText(frame, texto, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.rectangle(frame, (x1, y1_ajustado - altura_texto - 10), (x1 + largura_texto, y1_ajustado), cor, -1)
+                cv2.putText(frame, texto, (x1, y1_ajustado - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
 
-    cv2.imshow("Segmentacao de Alta Precisao", frame)
+    # --- APLICAR MÁSCARAS SEMÂNTICAS UNIFICADAS ---
+    indices_mascara = mascara_acumulada > 0
+    overlay = frame.copy()
+    overlay[indices_mascara] = mascara_acumulada[indices_mascara]
+    
+    cv2.addWeighted(overlay, peso_cor, frame, 1 - peso_cor, 0, frame)
+
+    cv2.imshow("Segmentacao Semantica Total", frame)
     
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
